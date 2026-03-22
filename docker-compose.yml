@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   madf:
-    image: frozenfish717/madf:latest
+    build: .
     container_name: madf-app
     ports:
       - "8000:8000"
@@ -16,7 +14,6 @@ services:
     volumes:
       - madf_data:/app/data
     restart: always
-    command: /app/start.sh
 
 volumes:
   madf_data:
