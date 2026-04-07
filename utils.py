@@ -21,6 +21,11 @@ client = ZhipuAI(
     base_url=settings.BASE_URL
 )
 
+# 全局变量用于跟踪API调用频率和速率限制状态
+api_call_history = []
+rate_limit_backoff = 0
+
+
 def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, timeout=30, callback=None, raise_error=False):
     """
     Wrapper for ZhipuAI chat completion with retry logic and timeout.
@@ -29,11 +34,35 @@ def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, 
         callback: Optional async function(error_msg: str) to report errors to system log
         raise_error: If True, raise the last exception instead of returning None when all retries fail.
     """
+    global api_call_history
+    global rate_limit_backoff
+    
+    # 清理过期的API调用记录（1分钟内）
+    current_time = time.time()
+    api_call_history = [t for t in api_call_history if current_time - t < 60]
+    
+    # 检查是否需要速率限制
+    if rate_limit_backoff > current_time:
+        wait_time = rate_limit_backoff - current_time
+        logger.warning(f"Rate limit detected, waiting {wait_time:.2f} seconds...")
+        time.sleep(wait_time)
+    
     attempt = 0
     last_error = None
     
     while attempt < max_retries:
         try:
+            # 记录API调用时间
+            api_call_history.append(time.time())
+            
+            # 检查调用频率（每分钟最多60次）
+            if len(api_call_history) > 60:
+                oldest_call = api_call_history[0]
+                wait_time = 60 - (current_time - oldest_call)
+                if wait_time > 0:
+                    logger.warning(f"API call frequency too high, waiting {wait_time:.2f} seconds...")
+                    time.sleep(wait_time)
+            
             if stream:
                 return client.chat.completions.create(
                     model=settings.MODEL_NAME,
@@ -54,12 +83,25 @@ def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, 
                 top_p=0.7,
                 timeout=timeout
             )
+            
+            # 成功调用后重置速率限制状态
+            rate_limit_backoff = 0
             return response
             
         except APIRequestFailedError as e:
             # 429 Rate Limit or 500 Server Error
             error_msg = f"API Request Failed (Attempt {attempt+1}/{max_retries}): {e}"
             logger.warning(error_msg)
+            
+            # 处理速率限制错误
+            if "429" in str(e):
+                # 计算退避时间（指数退避）
+                backoff_time = (2 ** attempt) * 5  # 5s, 10s, 20s...
+                logger.warning(f"Rate limit exceeded, backing off for {backoff_time} seconds...")
+                time.sleep(backoff_time)
+                # 设置全局退避时间
+                rate_limit_backoff = time.time() + backoff_time
+            
             if callback:
                 # We can't await here easily as this is sync function, 
                 # but caller usually wraps this in to_thread.
@@ -85,7 +127,10 @@ def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, 
             
         attempt += 1
         if attempt < max_retries:
-            time.sleep(1 + attempt) # Exponential backoff: 2s, 3s, 4s...
+            # 指数退避策略
+            backoff_time = (2 ** attempt) * 2  # 2s, 4s, 8s...
+            logger.info(f"Retrying in {backoff_time} seconds...")
+            time.sleep(backoff_time)
             
     logger.error(f"Chat completion failed after {max_retries} attempts. Last error: {last_error}")
     

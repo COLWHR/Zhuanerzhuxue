@@ -1,6 +1,7 @@
 import json
 import re
 import requests
+import time
 from typing import List, Dict, Any, Generator, Tuple, Optional
 from utils import get_chat_completion, parse_json_from_response
 from app.core.config import settings
@@ -94,14 +95,21 @@ from utils import get_chat_completion
 logger = logging.getLogger(__name__)
 
 class RealGodAgent:
-    def __init__(self, max_steps: int = 10):
+    def __init__(self, max_steps: int = 100):
         self.max_steps = max_steps
         self.searched_queries = set()
+        self.search_cache = {}  # 缓存搜索结果
+        self.persona_cache = {}  # 缓存已生成的角色信息
 
     def search(self, query: str) -> str:
         """
         Perform web search using ZhipuAI Web Search API via SDK.
         """
+        # 检查缓存中是否已有搜索结果
+        if query in self.search_cache:
+            logger.info(f"Using cached search result for: {query}")
+            return self.search_cache[query]
+        
         # Ensure we use the latest configuration (e.g. from environment)
         current_api_key = settings.final_api_key
         
@@ -151,7 +159,10 @@ class RealGodAgent:
                         
                     formatted_results.append(f"Title: {title}\nSource: {media}\nLink: {link}\nSnippet: {content}")
                 
-                return "\n\n".join(formatted_results)
+                result = "\n\n".join(formatted_results)
+                # 缓存搜索结果
+                self.search_cache[query] = result
+                return result
             else:
                 return "No search results found."
 
@@ -275,6 +286,12 @@ class RealGodAgent:
         self.searched_queries = set()
         
         while i < n:
+            # 在生成每个角色前添加延迟，避免API速率限制
+            if i > 0:
+                delay = 5 + (i * 2)  # 递增延迟，避免连续请求
+                yield {"type": "info", "content": f"等待 {delay} 秒后生成下一个角色..."}
+                time.sleep(delay)
+            
             current_index = i + 1
             
             # Check if N has been updated from background task
