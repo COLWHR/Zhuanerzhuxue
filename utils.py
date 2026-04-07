@@ -2,6 +2,8 @@ import os
 import json
 import time
 import re
+import base64
+import requests
 from zhipuai import ZhipuAI, APIRequestFailedError, APITimeoutError
 try:
     from zhipuai import APIError
@@ -26,13 +28,14 @@ api_call_history = []
 rate_limit_backoff = 0
 
 
-def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, timeout=30, callback=None, raise_error=False):
+def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, timeout=30, callback=None, raise_error=False, use_vision=False):
     """
     Wrapper for ZhipuAI chat completion with retry logic and timeout.
     
     Args:
         callback: Optional async function(error_msg: str) to report errors to system log
         raise_error: If True, raise the last exception instead of returning None when all retries fail.
+        use_vision: If True, use volcanic engine visual model for multimodal input
     """
     global api_call_history
     global rate_limit_backoff
@@ -50,6 +53,61 @@ def get_chat_completion(messages, stream=False, json_mode=False, max_retries=3, 
     attempt = 0
     last_error = None
     
+    # 如果是多模态请求且配置了火山引擎API，使用火山引擎视觉模型
+    if use_vision and settings.VOLC_API_KEY:
+        while attempt < max_retries:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {settings.VOLC_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "model": settings.VOLC_VISION_MODEL,
+                    "messages": messages,
+                    "stream": stream,
+                    "temperature": 0.8,
+                    "max_tokens": 4096,
+                    "top_p": 0.7
+                }
+                
+                response = requests.post(
+                    f"{settings.VOLC_BASE_URL}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                    stream=stream
+                )
+                response.raise_for_status()
+                
+                if stream:
+                    # 返回流式迭代器
+                    def stream_generator():
+                        for line in response.iter_lines():
+                            if line:
+                                line = line.decode('utf-8')
+                                if line.startswith('data: '):
+                                    data = line[6:]
+                                    if data == '[DONE]':
+                                        break
+                                    try:
+                                        yield json.loads(data)
+                                    except:
+                                        continue
+                    return stream_generator()
+                else:
+                    return response.json()
+                    
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Volc API Request Failed (Attempt {attempt+1}/{max_retries}): {e}"
+                logger.warning(error_msg)
+                last_error = e
+                
+            attempt += 1
+            if attempt < max_retries:
+                time.sleep(1 + attempt)
+    
+    # 普通文本请求或火山引擎不可用，使用智谱AI
     while attempt < max_retries:
         try:
             # 记录API调用时间
